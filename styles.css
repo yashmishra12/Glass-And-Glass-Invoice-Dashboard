@@ -1,0 +1,137 @@
+/* ============ TAB STATES ============ */
+.tab-btn {
+  color: #475569;
+}
+.tab-btn.active {
+  background: #fff;
+  color: #1e40af;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.format-btn {
+  color: #475569;
+}
+.format-btn.active {
+  background: #fff;
+  color: #1e40af;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+/* ============ TABLE INPUTS ============ */
+.cell-input {
+  width: 100%;
+  padding: 4px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: inherit;
+  color: inherit;
+}
+.cell-input:hover {
+  border-color: #e2e8f0;
+}
+.cell-input:focus {
+  outline: none;
+  border-color: #2563eb;
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+}
+.cell-input.text-right {
+  text-align: right;
+}
+
+tbody tr {
+  border-bottom: 1px solid #f1f5f9;
+}
+tbody tr:hover {
+  background: #f8fafc;
+}
+
+.row-delete {
+  color: #cbd5e1;
+  cursor: pointer;
+  padding: 4px;
+}
+.row-delete:hover {
+  color: #ef4444;
+}
+
+.computed {
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  padding: 4px 6px;
+}
+
+/* ============ INVOICE PAGE ============ */
+.invoice-page {
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  color: #111;
+  padding: 32px 40px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.invoice-page h1 {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.invoice-page table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.invoice-page th,
+.invoice-page td {
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  vertical-align: top;
+}
+.invoice-page th {
+  background: #f1f5f9;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.invoice-page td.num,
+.invoice-page th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.invoice-page .totals-row td {
+  background: #f8fafc;
+  font-weight: 600;
+}
+.invoice-page .grand-row td {
+  background: #1e40af;
+  color: #fff;
+  font-weight: 700;
+}
+
+/* ============ PRINT ============ */
+@media print {
+  body {
+    background: #fff;
+  }
+  .no-print,
+  header.no-print {
+    display: none !important;
+  }
+  #app-shell {
+    background: #fff;
+  }
+  #tab-invoice {
+    padding: 0 !important;
+    max-width: none !important;
+  }
+  .invoice-page {
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    padding: 16mm !important;
+    font-size: 11px;
+  }
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+}
