@@ -51,11 +51,10 @@ const DEFAULT_FOOTER = [
 const state = {
   gstRate: 0.18,
   meta: { client: '', address: '', project: '', date: todayISO() },
-  titles: { glass: 'Glass', hardware: 'Hardware', others: 'Others' },
-  glass: [],
-  hardware: [],
-  others: [],
-  customSections: [],  // [{ id, title, rows: [{particulars, qty, rate}] }]
+  // Sections are grouped by Room (Living Room / Bedroom / etc).
+  // Every section is uniform: { id, type, title, rows, [unit] }.
+  // Every room is uniform: { id, name, collapsed, sections: [...] }.
+  rooms: [],
   invoice: {
     no: '', customerNo: '', date: todayISO(), po: '', salesperson: '',
     billTo: '', remarks: '',
@@ -79,18 +78,41 @@ function blankOthers() {
 }
 
 let _nextSectionId = 1;
-function blankCustomSection() {
+const SECTION_DEFAULTS = {
+  glass:    { title: 'Glass',    blankRow: blankGlass },
+  hardware: { title: 'Hardware', blankRow: blankHardware },
+  others:   { title: 'Others',   blankRow: blankOthers },
+};
+function newSection(type, title) {
+  const def = SECTION_DEFAULTS[type];
+  const sec = {
+    id: 's-' + (_nextSectionId++),
+    type,
+    title: title != null ? title : def.title,
+    rows: [def.blankRow()],
+  };
+  if (type === 'glass') sec.unit = 'mm';
+  return sec;
+}
+
+let _nextRoomId = 1;
+function newRoom(name) {
+  const n = _nextRoomId++;
   return {
-    id: 'cs-' + (_nextSectionId++),
-    title: 'New Section',
-    rows: [blankOthers()],
+    id: 'r-' + n,
+    name: name || 'Room ' + n,
+    collapsed: false,
+    sections: [],
   };
 }
 
-// Seed one row in each table so the UI isn't empty on first load
-state.glass.push(blankGlass());
-state.hardware.push(blankHardware());
-state.others.push(blankOthers());
+// Seed: one room with the original three section types so the default layout
+// matches the workbook.
+const _firstRoom = newRoom('Room 1');
+_firstRoom.sections.push(newSection('glass'));
+_firstRoom.sections.push(newSection('hardware'));
+_firstRoom.sections.push(newSection('others'));
+state.rooms.push(_firstRoom);
 
 // ---------- Calculations ----------
 function getDriver(particulars) {
@@ -103,16 +125,19 @@ function ceilTo(value, multiple) {
   return Math.ceil(value / multiple) * multiple;
 }
 
-function calcGlass(row, gstRate) {
+function calcGlass(row, gstRate, unit = 'mm') {
   const h = Math.max(0, +row.h || 0);
   const w = Math.max(0, +row.w || 0);
   const qty = Math.max(0, +row.qty || 0);
   const rate = Math.max(0, +row.rate || 0);
+  // Convert dimensions to inches for the rest of the formula.
+  const hIn = unit === 'mm' ? h / 25.4 : h;
+  const wIn = unit === 'mm' ? w / 25.4 : w;
   const driver = getDriver(row.particulars);
   const grid = 6 * driver; // 6" or 12"
 
-  const actualSqft = (h / 25.4) * (w / 25.4) / 144 * qty;
-  const chargeableSqft = ceilTo(h / 25.4, grid) * ceilTo(w / 25.4, grid) / 144 * qty;
+  const actualSqft = (hIn * wIn) / 144 * qty;
+  const chargeableSqft = ceilTo(hIn, grid) * ceilTo(wIn, grid) / 144 * qty;
   const pretax = chargeableSqft * rate;
   const gst = pretax * gstRate;
   const total = pretax + gst;
@@ -170,22 +195,120 @@ const el = (tag, attrs = {}, children = []) => {
   return node;
 };
 
-// ---------- Render: Glass row ----------
-function renderGlassRow(row, idx) {
-  const calc = calcGlass(row, state.gstRate);
-  const tr = el('tr');
+// ---------- Calc dispatch by section type ----------
+// Takes the section so glass can read its `unit`.
+function calcRow(section, row, gstRate) {
+  if (section.type === 'glass') return calcGlass(row, gstRate, section.unit || 'mm');
+  if (section.type === 'hardware') return calcHardware(row, gstRate);
+  return calcOthers(row, gstRate);
+}
 
-  // Inputs trigger lightweight recompute (preserves focus/caret).
-  // Dropdowns trigger full render (driver mapping changes label/order, no focus issue).
-  const onInput = (field, parse) => (e) => {
-    row[field] = parse ? parse(e.target.value) : e.target.value;
-    recompute();
-  };
-  const onSelect = (field) => (e) => {
-    row[field] = e.target.value;
-    recompute();
-  };
+// ---------- Render: a single section card ----------
+function renderSection(section, sIdx, room) {
+  const card = el('div', {
+    class: 'bg-white rounded-xl border border-slate-200 overflow-hidden',
+    'data-section-id': section.id,
+    'data-section-type': section.type,
+  });
 
+  // Header: editable title + (glass only) unit toggle + Add Row + Delete Section
+  const header = el('div', { class: 'px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50 gap-3' });
+  const titleInput = el('input', {
+    class: 'section-title-input',
+    value: section.title,
+    oninput: (e) => { section.title = e.target.value; renderInvoice(); }
+  });
+  const actions = el('div', { class: 'flex gap-2 items-center' });
+
+  if (section.type === 'glass') {
+    actions.appendChild(renderUnitToggle(section));
+  }
+
+  actions.append(
+    el('button', {
+      class: 'text-xs font-medium text-brand-600 hover:text-brand-700 px-3 py-1.5 border border-brand-600 rounded-md',
+      onclick: () => { section.rows.push(SECTION_DEFAULTS[section.type].blankRow()); render(); }
+    }, '+ Add Row'),
+    el('button', {
+      class: 'text-xs font-medium text-red-600 hover:text-red-700 px-3 py-1.5 border border-red-300 rounded-md',
+      onclick: () => {
+        if (confirm('Delete section "' + section.title + '"?')) {
+          room.sections.splice(sIdx, 1);
+          render();
+        }
+      }
+    }, 'Delete Section'),
+  );
+  header.append(titleInput, actions);
+  card.appendChild(header);
+
+  // Table per type
+  const wrap = el('div', { class: 'overflow-x-auto' });
+  const tbl = el('table', { class: 'w-full text-sm' });
+  tbl.appendChild(buildSectionThead(section));
+
+  const tbody = el('tbody', { 'data-section-tbody': section.id });
+  section.rows.forEach((row, rIdx) => {
+    tbody.appendChild(buildSectionRow(section, rIdx, row));
+  });
+  tbl.appendChild(tbody);
+  tbl.appendChild(buildSectionTfoot(section));
+
+  wrap.appendChild(tbl);
+  card.appendChild(wrap);
+  return card;
+}
+
+function buildSectionThead(section) {
+  const u = section.type === 'glass' ? unitLabel(section.unit) : '';
+  const heads = {
+    glass: ['#', 'Thickness', 'Particulars', 'Process', 'Design', 'H (' + u + ')', 'W (' + u + ')', 'Qty', 'Actual Sqft', 'Sqft', 'Rate', 'Pretax', 'GST', 'Total', 'Remarks', ''],
+    hardware: ['#', 'Particulars', 'Qty', 'Rate', 'Discount %', 'Amount', 'GST', 'Final Amount', ''],
+    others: ['#', 'Particulars', 'Qty', 'Rate', 'Amount', 'GST', 'Final Amount', ''],
+  }[section.type];
+  return el('thead', { class: 'bg-slate-100 text-xs text-slate-600 uppercase' },
+    el('tr', {}, heads.map(h => el('th', { class: 'px-2 py-2 text-left' }, h))));
+}
+
+function unitLabel(unit) {
+  return unit === 'inch' ? 'in' : 'mm';
+}
+
+// Compact unit toggle: [MM | INCH]. Switching converts existing values so the
+// physical size stays the same.
+function renderUnitToggle(section) {
+  const wrap = el('div', { class: 'flex items-center gap-0 bg-slate-100 rounded-md p-0.5' });
+  const make = (unit, label) => el('button', {
+    class: 'px-2 py-1 text-xs font-medium rounded ' + (section.unit === unit ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'),
+    onclick: () => switchUnit(section, unit),
+  }, label);
+  wrap.append(make('mm', 'MM'), make('inch', 'INCH'));
+  return wrap;
+}
+
+function switchUnit(section, newUnit) {
+  if (section.unit === newUnit) return;
+  // Convert h/w in every row so the size doesn't change.
+  // mm → inch divides by 25.4; inch → mm multiplies.
+  const factor = newUnit === 'inch' ? (1 / 25.4) : 25.4;
+  for (const row of section.rows) {
+    row.h = +(((+row.h) || 0) * factor).toFixed(2);
+    row.w = +(((+row.w) || 0) * factor).toFixed(2);
+  }
+  section.unit = newUnit;
+  render();
+}
+
+function buildSectionRow(section, rIdx, row) {
+  if (section.type === 'glass') return buildGlassRow(section, rIdx, row);
+  if (section.type === 'hardware') return buildHardwareRow(section, rIdx, row);
+  return buildOthersRow(section, rIdx, row);
+}
+
+function buildGlassRow(section, rIdx, row) {
+  const calc = calcGlass(row, state.gstRate, section.unit || 'mm');
+  const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
+  const onSelect = (field) => (e) => { row[field] = e.target.value; recompute(); };
   const select = (field, options) => {
     const s = el('select', { class: 'cell-input', onchange: onSelect(field) });
     for (const opt of options) {
@@ -196,8 +319,8 @@ function renderGlassRow(row, idx) {
     return s;
   };
 
-  tr.append(
-    el('td', { class: 'px-2 py-1 text-slate-500' }, String(idx + 1)),
+  return el('tr', {}, [
+    el('td', { class: 'px-2 py-1 text-slate-500' }, String(rIdx + 1)),
     el('td', { class: 'px-2 py-1' }, select('thickness', THICKNESS_OPTIONS)),
     el('td', { class: 'px-2 py-1' }, select('particulars', GLASS_TYPES.map(g => g.name))),
     el('td', { class: 'px-2 py-1' }, select('process', PROCESS_OPTIONS)),
@@ -213,19 +336,15 @@ function renderGlassRow(row, idx) {
     el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(calc.total)),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.remarks, oninput: onInput('remarks') })),
     el('td', { class: 'px-2 py-1 text-center' },
-      el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { state.glass.splice(idx, 1); render(); } }, '✕'))
-  );
-  return tr;
+      el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { section.rows.splice(rIdx, 1); render(); } }, '✕')),
+  ]);
 }
 
-// ---------- Render: Hardware row ----------
-function renderHardwareRow(row, idx) {
+function buildHardwareRow(section, rIdx, row) {
   const calc = calcHardware(row, state.gstRate);
-  const tr = el('tr');
   const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
-
-  tr.append(
-    el('td', { class: 'px-2 py-1 text-slate-500' }, String(idx + 1)),
+  return el('tr', {}, [
+    el('td', { class: 'px-2 py-1 text-slate-500' }, String(rIdx + 1)),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onInput('particulars') })),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
@@ -234,19 +353,15 @@ function renderHardwareRow(row, idx) {
     el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(calc.gst)),
     el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(calc.total)),
     el('td', { class: 'px-2 py-1 text-center' },
-      el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { state.hardware.splice(idx, 1); render(); } }, '✕'))
-  );
-  return tr;
+      el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { section.rows.splice(rIdx, 1); render(); } }, '✕')),
+  ]);
 }
 
-// ---------- Render: Others row ----------
-function renderOthersRow(row, idx) {
+function buildOthersRow(section, rIdx, row) {
   const calc = calcOthers(row, state.gstRate);
-  const tr = el('tr');
   const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
-
-  tr.append(
-    el('td', { class: 'px-2 py-1 text-slate-500' }, String(idx + 1)),
+  return el('tr', {}, [
+    el('td', { class: 'px-2 py-1 text-slate-500' }, String(rIdx + 1)),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onInput('particulars') })),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
     el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
@@ -254,171 +369,211 @@ function renderOthersRow(row, idx) {
     el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(calc.gst)),
     el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(calc.total)),
     el('td', { class: 'px-2 py-1 text-center' },
-      el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { state.others.splice(idx, 1); render(); } }, '✕'))
-  );
-  return tr;
-}
-
-// ---------- Render: Custom sections (Others-shaped) ----------
-function renderCustomSections() {
-  const container = $('#custom-sections');
-  container.innerHTML = '';
-  state.customSections.forEach((section, sIdx) => {
-    container.appendChild(renderCustomSection(section, sIdx));
-  });
-}
-
-function renderCustomSection(section, sIdx) {
-  const card = el('div', { class: 'bg-white rounded-xl border border-slate-200 overflow-hidden', 'data-section-id': section.id });
-
-  // Header: editable title + Add Row + Delete Section
-  const header = el('div', { class: 'px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50' });
-  const titleInput = el('input', {
-    class: 'section-title-input',
-    value: section.title,
-    oninput: (e) => { section.title = e.target.value; renderInvoice(); }
-  });
-  const actions = el('div', { class: 'flex gap-2' }, [
-    el('button', {
-      class: 'text-xs font-medium text-brand-600 hover:text-brand-700 px-3 py-1.5 border border-brand-600 rounded-md',
-      onclick: () => { section.rows.push(blankOthers()); render(); }
-    }, '+ Add Row'),
-    el('button', {
-      class: 'text-xs font-medium text-red-600 hover:text-red-700 px-3 py-1.5 border border-red-300 rounded-md',
-      onclick: () => {
-        if (confirm('Delete section "' + section.title + '"?')) {
-          state.customSections.splice(sIdx, 1);
-          render();
-        }
-      }
-    }, 'Delete Section'),
+      el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { section.rows.splice(rIdx, 1); render(); } }, '✕')),
   ]);
-  header.append(titleInput, actions);
-  card.appendChild(header);
+}
 
-  // Table (Others schema)
-  const wrap = el('div', { class: 'overflow-x-auto' });
-  const tbl = el('table', { class: 'w-full text-sm' });
-  tbl.appendChild(el('thead', { class: 'bg-slate-100 text-xs text-slate-600 uppercase' }, el('tr', {}, [
-    el('th', { class: 'px-2 py-2 text-left w-10' }, '#'),
-    el('th', { class: 'px-2 py-2 text-left' }, 'Particulars'),
-    el('th', { class: 'px-2 py-2 text-right w-16' }, 'Qty'),
-    el('th', { class: 'px-2 py-2 text-right w-24' }, 'Rate'),
-    el('th', { class: 'px-2 py-2 text-right w-28' }, 'Amount'),
-    el('th', { class: 'px-2 py-2 text-right w-24' }, 'GST'),
-    el('th', { class: 'px-2 py-2 text-right w-28' }, 'Final Amount'),
-    el('th', { class: 'px-2 py-2 w-8' }),
-  ])));
-
-  const tbody = el('tbody', { 'data-custom-tbody': section.id });
-  section.rows.forEach((row, rIdx) => {
-    const c = calcOthers(row, state.gstRate);
-    const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
-    const tr = el('tr', {}, [
-      el('td', { class: 'px-2 py-1 text-slate-500' }, String(rIdx + 1)),
-      el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onInput('particulars') })),
-      el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
-      el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
-      el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'amount' }, fmtNum(c.amount)),
-      el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(c.gst)),
-      el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(c.total)),
-      el('td', { class: 'px-2 py-1 text-center' },
-        el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { section.rows.splice(rIdx, 1); render(); } }, '✕')),
-    ]);
-    tbody.appendChild(tr);
-  });
-  tbl.appendChild(tbody);
-
-  // Footer
-  tbl.appendChild(el('tfoot', { class: 'bg-slate-50 border-t-2 border-slate-200 font-semibold text-slate-700' }, el('tr', {}, [
-    el('td', { class: 'px-2 py-2 text-right', colspan: 4 }, 'TOTAL'),
-    el('td', { class: 'px-2 py-2 text-right', 'data-foot': section.id + '-pretax' }, '0.00'),
-    el('td', { class: 'px-2 py-2 text-right', 'data-foot': section.id + '-gst' }, '0.00'),
-    el('td', { class: 'px-2 py-2 text-right', 'data-foot': section.id + '-amount' }, '0.00'),
+function buildSectionTfoot(section) {
+  const id = section.id;
+  // Glass tfoot has Qty + Sqft + Pretax + GST + Amount; Hardware/Others just Pretax + GST + Amount
+  if (section.type === 'glass') {
+    return el('tfoot', { class: 'bg-slate-50 border-t-2 border-slate-200 font-semibold text-slate-700' }, el('tr', {}, [
+      el('td', { class: 'px-2 py-2 text-right', colspan: 7 }, 'TOTAL'),
+      el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-qty' }, '0'),
+      el('td', { class: 'px-2 py-2' }),
+      el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-sqft' }, '0.00'),
+      el('td', { class: 'px-2 py-2' }),
+      el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-pretax' }, '0.00'),
+      el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-gst' }, '0.00'),
+      el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-amount' }, '0.00'),
+      el('td', { colspan: 2 }),
+    ]));
+  }
+  // Hardware: TOTAL spans 5 cols then Pretax/GST/Amount
+  // Others:   TOTAL spans 4 cols then Pretax/GST/Amount
+  const totalSpan = section.type === 'hardware' ? 5 : 4;
+  return el('tfoot', { class: 'bg-slate-50 border-t-2 border-slate-200 font-semibold text-slate-700' }, el('tr', {}, [
+    el('td', { class: 'px-2 py-2 text-right', colspan: totalSpan }, 'TOTAL'),
+    el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-pretax' }, '0.00'),
+    el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-gst' }, '0.00'),
+    el('td', { class: 'px-2 py-2 text-right', 'data-foot': id + '-amount' }, '0.00'),
     el('td'),
-  ])));
-
-  wrap.appendChild(tbl);
-  card.appendChild(wrap);
-  return card;
+  ]));
 }
 
 // ---------- Aggregate totals ----------
 function totals() {
-  let gQty = 0, gSqft = 0, gPretax = 0, gGst = 0, gTotal = 0;
-  for (const r of state.glass) {
-    const c = calcGlass(r, state.gstRate);
-    gQty += +r.qty || 0;
-    gSqft += c.chargeableSqft;
-    gPretax += c.pretax;
-    gGst += c.gst;
-    gTotal += c.total;
-  }
-  let hPretax = 0, hGst = 0, hTotal = 0;
-  for (const r of state.hardware) {
-    const c = calcHardware(r, state.gstRate);
-    hPretax += c.amount; hGst += c.gst; hTotal += c.total;
-  }
-  let oPretax = 0, oGst = 0, oTotal = 0;
-  for (const r of state.others) {
-    const c = calcOthers(r, state.gstRate);
-    oPretax += c.amount; oGst += c.gst; oTotal += c.total;
-  }
-  // Custom sections
-  const customTotals = {};
-  let csTotal = 0, csPretax = 0;
-  for (const sec of state.customSections) {
-    let p = 0, g = 0, t = 0;
-    for (const r of sec.rows) {
-      const c = calcOthers(r, state.gstRate);
-      p += c.amount; g += c.gst; t += c.total;
+  const sectionTotals = {};   // id → { pretax, gst, total, qty?, sqft? }
+  const roomTotals = {};      // id → { pretax, gst, total }
+  let grand = 0, pretaxSum = 0, totalSum = 0;
+
+  for (const room of state.rooms) {
+    let rPretax = 0, rGst = 0, rTotal = 0;
+    for (const sec of room.sections) {
+      let p = 0, g = 0, t = 0, qty = 0, sqft = 0;
+      for (const r of sec.rows) {
+        const c = calcRow(sec, r, state.gstRate);
+        if (sec.type === 'glass') {
+          qty += +r.qty || 0;
+          sqft += c.chargeableSqft;
+          p += c.pretax;
+        } else {
+          p += c.amount;
+        }
+        g += c.gst;
+        t += c.total;
+      }
+      sectionTotals[sec.id] = { pretax: p, gst: g, total: t, qty, sqft };
+      rPretax += p; rGst += g; rTotal += t;
     }
-    customTotals[sec.id] = { pretax: p, gst: g, total: t };
-    csTotal += t; csPretax += p;
+    roomTotals[room.id] = { pretax: rPretax, gst: rGst, total: rTotal };
+    grand += rTotal;
+    pretaxSum += rPretax;
+    totalSum += rTotal;
   }
-  return {
-    glass: { qty: gQty, sqft: gSqft, pretax: gPretax, gst: gGst, total: gTotal },
-    hardware: { pretax: hPretax, gst: hGst, total: hTotal },
-    others: { pretax: oPretax, gst: oGst, total: oTotal },
-    custom: customTotals,
-    customPretaxSum: csPretax,
-    customTotalSum: csTotal,
-    grand: gTotal + hTotal + oTotal + csTotal,
-  };
+  return { sections: sectionTotals, rooms: roomTotals, pretaxSum, totalSum, grand };
 }
 
-// ---------- Render: tables + grand total ----------
+// ---------- Render: rooms → sections + grand total ----------
 function renderQuotation() {
-  const gTbody = $('#glass-tbody');
-  gTbody.innerHTML = '';
-  state.glass.forEach((row, idx) => gTbody.appendChild(renderGlassRow(row, idx)));
+  const container = $('#sections');
+  container.innerHTML = '';
 
-  const hTbody = $('#hardware-tbody');
-  hTbody.innerHTML = '';
-  state.hardware.forEach((row, idx) => hTbody.appendChild(renderHardwareRow(row, idx)));
+  if (state.rooms.length === 0) {
+    container.appendChild(renderEmptyRoomsState());
+  } else {
+    state.rooms.forEach((room, rIdx) => {
+      container.appendChild(renderRoom(room, rIdx));
+    });
+  }
 
-  const oTbody = $('#others-tbody');
-  oTbody.innerHTML = '';
-  state.others.forEach((row, idx) => oTbody.appendChild(renderOthersRow(row, idx)));
-
-  renderCustomSections();
+  // "+ Add Room" button after all rooms
+  container.appendChild(renderAddRoomButton());
 
   const t = totals();
-  $('#glass-total-qty').textContent = String(t.glass.qty);
-  $('#glass-total-sqft').textContent = fmtNum(t.glass.sqft);
-  $('#glass-total-pretax').textContent = fmtNum(t.glass.pretax);
-  $('#glass-total-gst').textContent = fmtNum(t.glass.gst);
-  $('#glass-total-amount').textContent = fmtNum(t.glass.total);
-
-  $('#hardware-total-pretax').textContent = fmtNum(t.hardware.pretax);
-  $('#hardware-total-gst').textContent = fmtNum(t.hardware.gst);
-  $('#hardware-total-amount').textContent = fmtNum(t.hardware.total);
-
-  $('#others-total-pretax').textContent = fmtNum(t.others.pretax);
-  $('#others-total-gst').textContent = fmtNum(t.others.gst);
-  $('#others-total-amount').textContent = fmtNum(t.others.total);
-
+  applyFootValues(t);
   $('#grand-total').textContent = fmtCur(t.grand);
+}
+
+function renderRoom(room, rIdx) {
+  const card = el('div', {
+    class: 'bg-slate-100/60 border border-slate-200 rounded-xl mb-6 overflow-hidden',
+    'data-room-id': room.id,
+  });
+
+  // Room header: chevron + name + total + delete
+  const header = el('div', { class: 'flex items-center gap-3 px-4 py-3 bg-slate-100' });
+  const chevron = el('button', {
+    class: 'text-slate-500 hover:text-slate-700 text-sm w-6 text-center',
+    title: room.collapsed ? 'Expand' : 'Collapse',
+    onclick: () => { room.collapsed = !room.collapsed; render(); }
+  }, room.collapsed ? '▶' : '▼');
+
+  const nameInput = el('input', {
+    class: 'room-name-input flex-1',
+    value: room.name,
+    placeholder: 'Room name',
+    oninput: (e) => { room.name = e.target.value; renderInvoice(); },
+  });
+
+  const totalSpan = el('span', {
+    class: 'text-xs font-medium text-slate-500',
+    'data-room-total': room.id,
+  }, '');
+
+  const deleteBtn = el('button', {
+    class: 'text-xs font-medium text-red-600 hover:text-red-700 px-3 py-1.5 border border-red-300 rounded-md',
+    onclick: () => {
+      if (confirm('Delete room "' + room.name + '" and all its sections?')) {
+        state.rooms.splice(rIdx, 1);
+        render();
+      }
+    }
+  }, 'Delete Room');
+
+  header.append(chevron, nameInput, totalSpan, deleteBtn);
+  card.appendChild(header);
+
+  // Body — sections + per-section Add buttons. Hidden when collapsed.
+  if (!room.collapsed) {
+    const body = el('div', { class: 'p-4 space-y-0' });
+    if (room.sections.length === 0) {
+      body.appendChild(renderEmptySectionsState(room));
+    } else {
+      room.sections.forEach((sec, sIdx) => {
+        const wrap = el('div', { class: 'mb-4' });
+        wrap.appendChild(renderSection(sec, sIdx, room));
+        wrap.appendChild(renderInlineAddButton(sec.type, sIdx, room));
+        body.appendChild(wrap);
+      });
+    }
+    card.appendChild(body);
+  }
+
+  return card;
+}
+
+function renderInlineAddButton(type, afterIdx, room) {
+  return el('div', { class: 'flex justify-center mt-2' }, [
+    el('button', {
+      class: 'px-4 py-1.5 text-xs font-medium text-brand-600 hover:text-brand-700 hover:bg-brand-50 border border-dashed border-brand-600 hover:border-solid rounded-md',
+      title: 'Add another ' + type + ' section to this room',
+      onclick: () => {
+        room.sections.splice(afterIdx + 1, 0, newSection(type));
+        render();
+      }
+    }, '+ Add'),
+  ]);
+}
+
+function renderEmptySectionsState(room) {
+  return el('div', { class: 'flex flex-col items-center gap-3 py-8 text-slate-500' }, [
+    el('div', { class: 'text-sm' }, 'No sections in this room — pick a type:'),
+    el('div', { class: 'flex gap-3 flex-wrap justify-center' }, ['glass', 'hardware', 'others'].map(type =>
+      el('button', {
+        class: 'px-4 py-2 text-sm font-medium text-brand-600 hover:text-brand-700 hover:bg-brand-50 border border-dashed border-brand-600 hover:border-solid rounded-md capitalize',
+        onclick: () => { room.sections.push(newSection(type)); render(); }
+      }, '+ Add ' + type)
+    )),
+  ]);
+}
+
+function renderEmptyRoomsState() {
+  return el('div', { class: 'flex flex-col items-center gap-3 py-12 text-slate-500' }, [
+    el('div', { class: 'text-sm' }, 'No rooms yet.'),
+  ]);
+}
+
+function renderAddRoomButton() {
+  return el('div', { class: 'flex justify-center mb-6' }, [
+    el('button', {
+      class: 'px-5 py-2 text-sm font-medium text-brand-600 hover:text-brand-700 hover:bg-brand-50 border border-dashed border-brand-600 hover:border-solid rounded-md',
+      onclick: () => { state.rooms.push(newRoom()); render(); }
+    }, '+ Add Room'),
+  ]);
+}
+
+function applyFootValues(t) {
+  for (const room of state.rooms) {
+    for (const sec of room.sections) {
+      const st = t.sections[sec.id];
+      setFoot(sec.id + '-pretax', fmtNum(st.pretax));
+      setFoot(sec.id + '-gst', fmtNum(st.gst));
+      setFoot(sec.id + '-amount', fmtNum(st.total));
+      if (sec.type === 'glass') {
+        setFoot(sec.id + '-qty', String(st.qty));
+        setFoot(sec.id + '-sqft', fmtNum(st.sqft));
+      }
+    }
+    // Room total label in the header
+    const roomTotalEl = document.querySelector('[data-room-total="' + room.id + '"]');
+    if (roomTotalEl) roomTotalEl.textContent = fmtCur(t.rooms[room.id].total);
+  }
+}
+
+function setFoot(name, value) {
+  const c = document.querySelector('[data-foot="' + name + '"]');
+  if (c) c.textContent = value;
 }
 
 // ---------- Invoice rendering ----------
@@ -432,10 +587,8 @@ function renderInvoice() {
   const t = totals();
   const isPerRow = inv.format === 'per-row';
 
-  // Subtotal — includes custom sections
-  const subtotal = isPerRow
-    ? (t.glass.total + t.hardware.total + t.others.total + t.customTotalSum)
-    : (t.glass.pretax + t.hardware.pretax + t.others.pretax + t.customPretaxSum);
+  // Subtotal across all sections, in either format
+  const subtotal = isPerRow ? t.totalSum : t.pretaxSum;
 
   // Final total
   const shipping = +inv.shipping || 0;
@@ -493,29 +646,27 @@ function renderInvoice() {
   ]);
   root.appendChild(meta);
 
-  // ----- GLASS table
-  if (state.glass.length) {
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, state.titles.glass));
-    root.appendChild(buildGlassInvoiceTable(isPerRow, t.glass));
-  }
+  // ----- Rooms → sections. Each room becomes a heading; each section a sub-heading + table.
+  state.rooms.forEach((room) => {
+    if (!room.sections.length) return;
+    // Skip rooms whose every section is empty
+    const hasContent = room.sections.some(s => s.rows.length > 0);
+    if (!hasContent) return;
 
-  // ----- HARDWARE table
-  if (state.hardware.length) {
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, state.titles.hardware));
-    root.appendChild(buildHardwareInvoiceTable(isPerRow, t.hardware));
-  }
+    // Room name as a larger heading
+    root.appendChild(el('div', {
+      class: 'font-bold mt-6 mb-2 pb-1 border-b border-slate-300',
+      style: 'text-transform: uppercase; font-size: 13px; letter-spacing: 0.5px;',
+    }, room.name || 'Room'));
 
-  // ----- OTHERS table
-  if (state.others.length) {
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, state.titles.others));
-    root.appendChild(buildOthersInvoiceTable(isPerRow, t.others));
-  }
-
-  // ----- CUSTOM SECTIONS (each rendered Others-shaped)
-  state.customSections.forEach((sec) => {
-    if (!sec.rows.length) return;
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, sec.title));
-    root.appendChild(buildCustomSectionInvoiceTable(isPerRow, sec, t.custom[sec.id]));
+    room.sections.forEach((sec) => {
+      if (!sec.rows.length) return;
+      root.appendChild(el('div', { class: 'font-semibold mt-3 mb-1', style: 'text-transform: uppercase; font-size: 11px;' }, sec.title));
+      const st = t.sections[sec.id];
+      if (sec.type === 'glass') root.appendChild(buildGlassInvoiceTable(isPerRow, sec, st));
+      else if (sec.type === 'hardware') root.appendChild(buildHardwareInvoiceTable(isPerRow, sec.rows, st));
+      else root.appendChild(buildOthersInvoiceTable(isPerRow, sec.rows, st));
+    });
   });
 
   // ----- Bottom: remarks (left) + totals (right)
@@ -570,42 +721,42 @@ function rowKV(label, value, totals = false) {
   return tr;
 }
 
-function buildGlassInvoiceTable(isPerRow, totalsRow) {
+function gstHeader() {
+  return `GST (${(state.gstRate * 100).toFixed(state.gstRate * 100 % 1 ? 2 : 0)}%)`;
+}
+
+function buildGlassInvoiceTable(isPerRow, section, totalsRow) {
+  const u = unitLabel(section.unit);
+  const dpDim = section.unit === 'inch' ? 2 : 0;
   const head = isPerRow
-    ? ['Sl', 'Particulars', 'H (mm)', 'W (mm)', 'Qty', 'Sqft', 'Rate', 'Pretax', `GST (${(state.gstRate * 100).toFixed(state.gstRate * 100 % 1 ? 2 : 0)}%)`, 'Total']
-    : ['Sl', 'Particulars', 'H (mm)', 'W (mm)', 'Qty', 'Sqft', 'Rate', 'Amount'];
-
+    ? ['Sl', 'Particulars', 'H (' + u + ')', 'W (' + u + ')', 'Qty', 'Sqft', 'Rate', 'Pretax', gstHeader(), 'Total']
+    : ['Sl', 'Particulars', 'H (' + u + ')', 'W (' + u + ')', 'Qty', 'Sqft', 'Rate', 'Amount'];
   const tbl = el('table');
-  const thead = el('thead', {}, el('tr', {}, head.map((h, i) => el('th', { class: i >= 2 ? 'num' : '' }, h))));
-  tbl.appendChild(thead);
+  tbl.appendChild(el('thead', {}, el('tr', {}, head.map((h, i) => el('th', { class: i >= 2 ? 'num' : '' }, h)))));
   const tbody = el('tbody');
-
-  state.glass.forEach((r, i) => {
-    const c = calcGlass(r, state.gstRate);
+  section.rows.forEach((r, i) => {
+    const c = calcGlass(r, state.gstRate, section.unit || 'mm');
     const cells = isPerRow
-      ? [String(i + 1), glassParticularsLabel(r), fmtNum(r.h, 0), fmtNum(r.w, 0), String(r.qty), fmtNum(c.chargeableSqft), fmtNum(r.rate), fmtNum(c.pretax), fmtNum(c.gst), fmtNum(c.total)]
-      : [String(i + 1), glassParticularsLabel(r), fmtNum(r.h, 0), fmtNum(r.w, 0), String(r.qty), fmtNum(c.chargeableSqft), fmtNum(r.rate), fmtNum(c.pretax)];
+      ? [String(i + 1), glassParticularsLabel(r), fmtNum(r.h, dpDim), fmtNum(r.w, dpDim), String(r.qty), fmtNum(c.chargeableSqft), fmtNum(r.rate), fmtNum(c.pretax), fmtNum(c.gst), fmtNum(c.total)]
+      : [String(i + 1), glassParticularsLabel(r), fmtNum(r.h, dpDim), fmtNum(r.w, dpDim), String(r.qty), fmtNum(c.chargeableSqft), fmtNum(r.rate), fmtNum(c.pretax)];
     tbody.appendChild(el('tr', {}, cells.map((v, idx) => el('td', { class: idx >= 2 ? 'num' : '' }, v))));
   });
-
-  // Total row
   const totalCells = isPerRow
     ? ['', 'TOTAL', '', '', String(totalsRow.qty), fmtNum(totalsRow.sqft), '', fmtNum(totalsRow.pretax), fmtNum(totalsRow.gst), fmtNum(totalsRow.total)]
     : ['', 'TOTAL', '', '', String(totalsRow.qty), fmtNum(totalsRow.sqft), '', fmtNum(totalsRow.pretax)];
   tbody.appendChild(el('tr', { class: 'totals-row' }, totalCells.map((v, idx) => el('td', { class: idx >= 2 ? 'num' : '' }, v))));
-
   tbl.appendChild(tbody);
   return tbl;
 }
 
-function buildHardwareInvoiceTable(isPerRow, totalsRow) {
+function buildHardwareInvoiceTable(isPerRow, rows, totalsRow) {
   const head = isPerRow
-    ? ['Sl', 'Particulars', 'Qty', 'Rate', 'Discount %', 'Amount', `GST (${(state.gstRate * 100).toFixed(state.gstRate * 100 % 1 ? 2 : 0)}%)`, 'Total']
+    ? ['Sl', 'Particulars', 'Qty', 'Rate', 'Discount %', 'Amount', gstHeader(), 'Total']
     : ['Sl', 'Particulars', 'Qty', 'Rate', 'Discount %', 'Amount'];
   const tbl = el('table');
   tbl.appendChild(el('thead', {}, el('tr', {}, head.map((h, i) => el('th', { class: i >= 2 ? 'num' : '' }, h)))));
   const tbody = el('tbody');
-  state.hardware.forEach((r, i) => {
+  rows.forEach((r, i) => {
     const c = calcHardware(r, state.gstRate);
     const cells = isPerRow
       ? [String(i + 1), r.particulars || '', String(r.qty), fmtNum(r.rate), fmtNum(r.discount, 0) + '%', fmtNum(c.amount), fmtNum(c.gst), fmtNum(c.total)]
@@ -620,17 +771,9 @@ function buildHardwareInvoiceTable(isPerRow, totalsRow) {
   return tbl;
 }
 
-function buildOthersInvoiceTable(isPerRow, totalsRow) {
-  return buildOthersShapedTable(isPerRow, state.others, totalsRow);
-}
-
-function buildCustomSectionInvoiceTable(isPerRow, section, totalsRow) {
-  return buildOthersShapedTable(isPerRow, section.rows, totalsRow);
-}
-
-function buildOthersShapedTable(isPerRow, rows, totalsRow) {
+function buildOthersInvoiceTable(isPerRow, rows, totalsRow) {
   const head = isPerRow
-    ? ['Sl', 'Particulars', 'Qty', 'Rate', 'Amount', `GST (${(state.gstRate * 100).toFixed(state.gstRate * 100 % 1 ? 2 : 0)}%)`, 'Total']
+    ? ['Sl', 'Particulars', 'Qty', 'Rate', 'Amount', gstHeader(), 'Total']
     : ['Sl', 'Particulars', 'Qty', 'Rate', 'Amount'];
   const tbl = el('table');
   tbl.appendChild(el('thead', {}, el('tr', {}, head.map((h, i) => el('th', { class: i >= 2 ? 'num' : '' }, h)))));
@@ -664,72 +807,28 @@ function render() {
 function recompute() {
   const t = totals();
 
-  // Glass row computed cells
-  const gRows = document.querySelectorAll('#glass-tbody tr');
-  state.glass.forEach((row, idx) => {
-    const tr = gRows[idx]; if (!tr) return;
-    const c = calcGlass(row, state.gstRate);
-    setCell(tr, 'actualSqft', fmtNum(c.actualSqft));
-    setCell(tr, 'chargeableSqft', fmtNum(c.chargeableSqft));
-    setCell(tr, 'pretax', fmtNum(c.pretax));
-    setCell(tr, 'gst', fmtNum(c.gst));
-    setCell(tr, 'total', fmtNum(c.total));
-  });
+  for (const room of state.rooms) {
+    for (const sec of room.sections) {
+      const tbody = document.querySelector('[data-section-tbody="' + sec.id + '"]');
+      if (!tbody) continue;
+      const rows = tbody.querySelectorAll('tr');
+      sec.rows.forEach((row, idx) => {
+        const tr = rows[idx]; if (!tr) return;
+        const c = calcRow(sec, row, state.gstRate);
+        if (sec.type === 'glass') {
+          setCell(tr, 'actualSqft', fmtNum(c.actualSqft));
+          setCell(tr, 'chargeableSqft', fmtNum(c.chargeableSqft));
+          setCell(tr, 'pretax', fmtNum(c.pretax));
+        } else {
+          setCell(tr, 'amount', fmtNum(c.amount));
+        }
+        setCell(tr, 'gst', fmtNum(c.gst));
+        setCell(tr, 'total', fmtNum(c.total));
+      });
+    }
+  }
 
-  // Hardware row computed cells
-  const hRows = document.querySelectorAll('#hardware-tbody tr');
-  state.hardware.forEach((row, idx) => {
-    const tr = hRows[idx]; if (!tr) return;
-    const c = calcHardware(row, state.gstRate);
-    setCell(tr, 'amount', fmtNum(c.amount));
-    setCell(tr, 'gst', fmtNum(c.gst));
-    setCell(tr, 'total', fmtNum(c.total));
-  });
-
-  // Others row computed cells
-  const oRows = document.querySelectorAll('#others-tbody tr');
-  state.others.forEach((row, idx) => {
-    const tr = oRows[idx]; if (!tr) return;
-    const c = calcOthers(row, state.gstRate);
-    setCell(tr, 'amount', fmtNum(c.amount));
-    setCell(tr, 'gst', fmtNum(c.gst));
-    setCell(tr, 'total', fmtNum(c.total));
-  });
-
-  // Custom sections: row cells + footer
-  state.customSections.forEach((sec) => {
-    const tbody = document.querySelector('[data-custom-tbody="' + sec.id + '"]');
-    if (!tbody) return;
-    const rows = tbody.querySelectorAll('tr');
-    sec.rows.forEach((row, idx) => {
-      const tr = rows[idx]; if (!tr) return;
-      const c = calcOthers(row, state.gstRate);
-      setCell(tr, 'amount', fmtNum(c.amount));
-      setCell(tr, 'gst', fmtNum(c.gst));
-      setCell(tr, 'total', fmtNum(c.total));
-    });
-    // Section footer
-    const footPretax = document.querySelector('[data-foot="' + sec.id + '-pretax"]');
-    const footGst = document.querySelector('[data-foot="' + sec.id + '-gst"]');
-    const footAmt = document.querySelector('[data-foot="' + sec.id + '-amount"]');
-    const ct = t.custom[sec.id] || { pretax: 0, gst: 0, total: 0 };
-    if (footPretax) footPretax.textContent = fmtNum(ct.pretax);
-    if (footGst) footGst.textContent = fmtNum(ct.gst);
-    if (footAmt) footAmt.textContent = fmtNum(ct.total);
-  });
-
-  // Footer totals
-  $('#glass-total-qty').textContent = String(t.glass.qty);
-  $('#glass-total-sqft').textContent = fmtNum(t.glass.sqft);
-  $('#glass-total-pretax').textContent = fmtNum(t.glass.pretax);
-  $('#glass-total-gst').textContent = fmtNum(t.glass.gst);
-  $('#glass-total-amount').textContent = fmtNum(t.glass.total);
-  $('#hardware-total-pretax').textContent = fmtNum(t.hardware.pretax);
-  $('#hardware-total-gst').textContent = fmtNum(t.hardware.gst);
-  $('#hardware-total-amount').textContent = fmtNum(t.hardware.total);
-  $('#others-total-pretax').textContent = fmtNum(t.others.pretax);
-  $('#others-total-gst').textContent = fmtNum(t.others.gst);
-  $('#others-total-amount').textContent = fmtNum(t.others.total);
+  applyFootValues(t);
   $('#grand-total').textContent = fmtCur(t.grand);
 
   // Invoice preview reflects new totals too. It rebuilds its own DOM but
@@ -759,33 +858,11 @@ function bindUI() {
   document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
   // Format toggle
   document.querySelectorAll('.format-btn').forEach(b => b.addEventListener('click', () => setFormat(b.dataset.format)));
-  // Add row
-  document.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => {
-    const which = b.dataset.add;
-    if (which === 'glass') state.glass.push(blankGlass());
-    if (which === 'hardware') state.hardware.push(blankHardware());
-    if (which === 'others') state.others.push(blankOthers());
-    render();
-  }));
-  // Add custom section
-  $('#add-section-btn').addEventListener('click', () => {
-    state.customSections.push(blankCustomSection());
-    render();
-  });
   // GST rate (recompute, not full render — user is typing in the input)
   $('#gst-rate').addEventListener('input', (e) => {
     state.gstRate = (Number(e.target.value) || 0) / 100;
-    // Headers like "GST (18%)" are part of the invoice DOM which renderInvoice rebuilds;
-    // recompute calls renderInvoice internally so labels update too.
     recompute();
   });
-  // Section titles (recompute, not full render — user is typing here)
-  $('#glass-title').addEventListener('input', e => { state.titles.glass = e.target.value; renderInvoice(); });
-  $('#hardware-title').addEventListener('input', e => { state.titles.hardware = e.target.value; renderInvoice(); });
-  $('#others-title').addEventListener('input', e => { state.titles.others = e.target.value; renderInvoice(); });
-  $('#glass-title').value = state.titles.glass;
-  $('#hardware-title').value = state.titles.hardware;
-  $('#others-title').value = state.titles.others;
 
   // Project meta
   $('#meta-client').addEventListener('input', e => state.meta.client = e.target.value);
