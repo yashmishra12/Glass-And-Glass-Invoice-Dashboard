@@ -51,9 +51,11 @@ const DEFAULT_FOOTER = [
 const state = {
   gstRate: 0.18,
   meta: { client: '', address: '', project: '', date: todayISO() },
+  titles: { glass: 'Glass', hardware: 'Hardware', others: 'Others' },
   glass: [],
   hardware: [],
   others: [],
+  customSections: [],  // [{ id, title, rows: [{particulars, qty, rate}] }]
   invoice: {
     no: '', customerNo: '', date: todayISO(), po: '', salesperson: '',
     billTo: '', remarks: '',
@@ -74,6 +76,15 @@ function blankHardware() {
 }
 function blankOthers() {
   return { particulars: '', qty: 1, rate: 0 };
+}
+
+let _nextSectionId = 1;
+function blankCustomSection() {
+  return {
+    id: 'cs-' + (_nextSectionId++),
+    title: 'New Section',
+    rows: [blankOthers()],
+  };
 }
 
 // Seed one row in each table so the UI isn't empty on first load
@@ -164,13 +175,19 @@ function renderGlassRow(row, idx) {
   const calc = calcGlass(row, state.gstRate);
   const tr = el('tr');
 
-  const onChange = (field, parse) => (e) => {
+  // Inputs trigger lightweight recompute (preserves focus/caret).
+  // Dropdowns trigger full render (driver mapping changes label/order, no focus issue).
+  const onInput = (field, parse) => (e) => {
     row[field] = parse ? parse(e.target.value) : e.target.value;
-    render();
+    recompute();
+  };
+  const onSelect = (field) => (e) => {
+    row[field] = e.target.value;
+    recompute();
   };
 
   const select = (field, options) => {
-    const s = el('select', { class: 'cell-input', onchange: onChange(field) });
+    const s = el('select', { class: 'cell-input', onchange: onSelect(field) });
     for (const opt of options) {
       const o = el('option', { value: opt }, opt);
       if (row[field] === opt) o.selected = true;
@@ -185,16 +202,16 @@ function renderGlassRow(row, idx) {
     el('td', { class: 'px-2 py-1' }, select('particulars', GLASS_TYPES.map(g => g.name))),
     el('td', { class: 'px-2 py-1' }, select('process', PROCESS_OPTIONS)),
     el('td', { class: 'px-2 py-1' }, select('design', DESIGN_OPTIONS)),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.h, oninput: onChange('h', nonNeg) })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.w, oninput: onChange('w', nonNeg) })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onChange('qty', nonNeg) })),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.actualSqft)),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.chargeableSqft)),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onChange('rate', nonNeg) })),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.pretax)),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.gst)),
-    el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800' }, fmtNum(calc.total)),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.remarks, oninput: onChange('remarks') })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.h, oninput: onInput('h', nonNeg) })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.w, oninput: onInput('w', nonNeg) })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'actualSqft' }, fmtNum(calc.actualSqft)),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'chargeableSqft' }, fmtNum(calc.chargeableSqft)),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'pretax' }, fmtNum(calc.pretax)),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(calc.gst)),
+    el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(calc.total)),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.remarks, oninput: onInput('remarks') })),
     el('td', { class: 'px-2 py-1 text-center' },
       el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { state.glass.splice(idx, 1); render(); } }, '✕'))
   );
@@ -205,17 +222,17 @@ function renderGlassRow(row, idx) {
 function renderHardwareRow(row, idx) {
   const calc = calcHardware(row, state.gstRate);
   const tr = el('tr');
-  const onChange = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; render(); };
+  const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
 
   tr.append(
     el('td', { class: 'px-2 py-1 text-slate-500' }, String(idx + 1)),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onChange('particulars') })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onChange('qty', nonNeg) })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onChange('rate', nonNeg) })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, max: 100, class: 'cell-input text-right', value: row.discount, oninput: onChange('discount', pct0to100) })),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.amount)),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.gst)),
-    el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800' }, fmtNum(calc.total)),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onInput('particulars') })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, max: 100, class: 'cell-input text-right', value: row.discount, oninput: onInput('discount', pct0to100) })),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'amount' }, fmtNum(calc.amount)),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(calc.gst)),
+    el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(calc.total)),
     el('td', { class: 'px-2 py-1 text-center' },
       el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { state.hardware.splice(idx, 1); render(); } }, '✕'))
   );
@@ -226,20 +243,104 @@ function renderHardwareRow(row, idx) {
 function renderOthersRow(row, idx) {
   const calc = calcOthers(row, state.gstRate);
   const tr = el('tr');
-  const onChange = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; render(); };
+  const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
 
   tr.append(
     el('td', { class: 'px-2 py-1 text-slate-500' }, String(idx + 1)),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onChange('particulars') })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onChange('qty', nonNeg) })),
-    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onChange('rate', nonNeg) })),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.amount)),
-    el('td', { class: 'px-2 py-1 text-right computed' }, fmtNum(calc.gst)),
-    el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800' }, fmtNum(calc.total)),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onInput('particulars') })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
+    el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'amount' }, fmtNum(calc.amount)),
+    el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(calc.gst)),
+    el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(calc.total)),
     el('td', { class: 'px-2 py-1 text-center' },
       el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { state.others.splice(idx, 1); render(); } }, '✕'))
   );
   return tr;
+}
+
+// ---------- Render: Custom sections (Others-shaped) ----------
+function renderCustomSections() {
+  const container = $('#custom-sections');
+  container.innerHTML = '';
+  state.customSections.forEach((section, sIdx) => {
+    container.appendChild(renderCustomSection(section, sIdx));
+  });
+}
+
+function renderCustomSection(section, sIdx) {
+  const card = el('div', { class: 'bg-white rounded-xl border border-slate-200 overflow-hidden', 'data-section-id': section.id });
+
+  // Header: editable title + Add Row + Delete Section
+  const header = el('div', { class: 'px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50' });
+  const titleInput = el('input', {
+    class: 'section-title-input',
+    value: section.title,
+    oninput: (e) => { section.title = e.target.value; renderInvoice(); }
+  });
+  const actions = el('div', { class: 'flex gap-2' }, [
+    el('button', {
+      class: 'text-xs font-medium text-brand-600 hover:text-brand-700 px-3 py-1.5 border border-brand-600 rounded-md',
+      onclick: () => { section.rows.push(blankOthers()); render(); }
+    }, '+ Add Row'),
+    el('button', {
+      class: 'text-xs font-medium text-red-600 hover:text-red-700 px-3 py-1.5 border border-red-300 rounded-md',
+      onclick: () => {
+        if (confirm('Delete section "' + section.title + '"?')) {
+          state.customSections.splice(sIdx, 1);
+          render();
+        }
+      }
+    }, 'Delete Section'),
+  ]);
+  header.append(titleInput, actions);
+  card.appendChild(header);
+
+  // Table (Others schema)
+  const wrap = el('div', { class: 'overflow-x-auto' });
+  const tbl = el('table', { class: 'w-full text-sm' });
+  tbl.appendChild(el('thead', { class: 'bg-slate-100 text-xs text-slate-600 uppercase' }, el('tr', {}, [
+    el('th', { class: 'px-2 py-2 text-left w-10' }, '#'),
+    el('th', { class: 'px-2 py-2 text-left' }, 'Particulars'),
+    el('th', { class: 'px-2 py-2 text-right w-16' }, 'Qty'),
+    el('th', { class: 'px-2 py-2 text-right w-24' }, 'Rate'),
+    el('th', { class: 'px-2 py-2 text-right w-28' }, 'Amount'),
+    el('th', { class: 'px-2 py-2 text-right w-24' }, 'GST'),
+    el('th', { class: 'px-2 py-2 text-right w-28' }, 'Final Amount'),
+    el('th', { class: 'px-2 py-2 w-8' }),
+  ])));
+
+  const tbody = el('tbody', { 'data-custom-tbody': section.id });
+  section.rows.forEach((row, rIdx) => {
+    const c = calcOthers(row, state.gstRate);
+    const onInput = (field, parse) => (e) => { row[field] = parse ? parse(e.target.value) : e.target.value; recompute(); };
+    const tr = el('tr', {}, [
+      el('td', { class: 'px-2 py-1 text-slate-500' }, String(rIdx + 1)),
+      el('td', { class: 'px-2 py-1' }, el('input', { type: 'text', class: 'cell-input', value: row.particulars, oninput: onInput('particulars') })),
+      el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.qty, oninput: onInput('qty', nonNeg) })),
+      el('td', { class: 'px-2 py-1' }, el('input', { type: 'number', min: 0, class: 'cell-input text-right', value: row.rate, oninput: onInput('rate', nonNeg) })),
+      el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'amount' }, fmtNum(c.amount)),
+      el('td', { class: 'px-2 py-1 text-right computed', 'data-cell': 'gst' }, fmtNum(c.gst)),
+      el('td', { class: 'px-2 py-1 text-right computed font-medium text-slate-800', 'data-cell': 'total' }, fmtNum(c.total)),
+      el('td', { class: 'px-2 py-1 text-center' },
+        el('span', { class: 'row-delete', title: 'Delete row', onclick: () => { section.rows.splice(rIdx, 1); render(); } }, '✕')),
+    ]);
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+
+  // Footer
+  tbl.appendChild(el('tfoot', { class: 'bg-slate-50 border-t-2 border-slate-200 font-semibold text-slate-700' }, el('tr', {}, [
+    el('td', { class: 'px-2 py-2 text-right', colspan: 4 }, 'TOTAL'),
+    el('td', { class: 'px-2 py-2 text-right', 'data-foot': section.id + '-pretax' }, '0.00'),
+    el('td', { class: 'px-2 py-2 text-right', 'data-foot': section.id + '-gst' }, '0.00'),
+    el('td', { class: 'px-2 py-2 text-right', 'data-foot': section.id + '-amount' }, '0.00'),
+    el('td'),
+  ])));
+
+  wrap.appendChild(tbl);
+  card.appendChild(wrap);
+  return card;
 }
 
 // ---------- Aggregate totals ----------
@@ -263,11 +364,26 @@ function totals() {
     const c = calcOthers(r, state.gstRate);
     oPretax += c.amount; oGst += c.gst; oTotal += c.total;
   }
+  // Custom sections
+  const customTotals = {};
+  let csTotal = 0, csPretax = 0;
+  for (const sec of state.customSections) {
+    let p = 0, g = 0, t = 0;
+    for (const r of sec.rows) {
+      const c = calcOthers(r, state.gstRate);
+      p += c.amount; g += c.gst; t += c.total;
+    }
+    customTotals[sec.id] = { pretax: p, gst: g, total: t };
+    csTotal += t; csPretax += p;
+  }
   return {
     glass: { qty: gQty, sqft: gSqft, pretax: gPretax, gst: gGst, total: gTotal },
     hardware: { pretax: hPretax, gst: hGst, total: hTotal },
     others: { pretax: oPretax, gst: oGst, total: oTotal },
-    grand: gTotal + hTotal + oTotal,
+    custom: customTotals,
+    customPretaxSum: csPretax,
+    customTotalSum: csTotal,
+    grand: gTotal + hTotal + oTotal + csTotal,
   };
 }
 
@@ -284,6 +400,8 @@ function renderQuotation() {
   const oTbody = $('#others-tbody');
   oTbody.innerHTML = '';
   state.others.forEach((row, idx) => oTbody.appendChild(renderOthersRow(row, idx)));
+
+  renderCustomSections();
 
   const t = totals();
   $('#glass-total-qty').textContent = String(t.glass.qty);
@@ -314,10 +432,10 @@ function renderInvoice() {
   const t = totals();
   const isPerRow = inv.format === 'per-row';
 
-  // Subtotal
+  // Subtotal — includes custom sections
   const subtotal = isPerRow
-    ? (t.glass.total + t.hardware.total + t.others.total)
-    : (t.glass.pretax + t.hardware.pretax + t.others.pretax);
+    ? (t.glass.total + t.hardware.total + t.others.total + t.customTotalSum)
+    : (t.glass.pretax + t.hardware.pretax + t.others.pretax + t.customPretaxSum);
 
   // Final total
   const shipping = +inv.shipping || 0;
@@ -377,21 +495,28 @@ function renderInvoice() {
 
   // ----- GLASS table
   if (state.glass.length) {
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1' }, 'GLASS'));
+    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, state.titles.glass));
     root.appendChild(buildGlassInvoiceTable(isPerRow, t.glass));
   }
 
   // ----- HARDWARE table
   if (state.hardware.length) {
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1' }, 'HARDWARE: OZONE'));
+    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, state.titles.hardware));
     root.appendChild(buildHardwareInvoiceTable(isPerRow, t.hardware));
   }
 
   // ----- OTHERS table
   if (state.others.length) {
-    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1' }, 'OTHERS'));
+    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, state.titles.others));
     root.appendChild(buildOthersInvoiceTable(isPerRow, t.others));
   }
+
+  // ----- CUSTOM SECTIONS (each rendered Others-shaped)
+  state.customSections.forEach((sec) => {
+    if (!sec.rows.length) return;
+    root.appendChild(el('div', { class: 'font-semibold mt-4 mb-1', style: 'text-transform: uppercase;' }, sec.title));
+    root.appendChild(buildCustomSectionInvoiceTable(isPerRow, sec, t.custom[sec.id]));
+  });
 
   // ----- Bottom: remarks (left) + totals (right)
   const bottom = el('div', { class: 'flex gap-6 mt-6' });
@@ -496,13 +621,21 @@ function buildHardwareInvoiceTable(isPerRow, totalsRow) {
 }
 
 function buildOthersInvoiceTable(isPerRow, totalsRow) {
+  return buildOthersShapedTable(isPerRow, state.others, totalsRow);
+}
+
+function buildCustomSectionInvoiceTable(isPerRow, section, totalsRow) {
+  return buildOthersShapedTable(isPerRow, section.rows, totalsRow);
+}
+
+function buildOthersShapedTable(isPerRow, rows, totalsRow) {
   const head = isPerRow
     ? ['Sl', 'Particulars', 'Qty', 'Rate', 'Amount', `GST (${(state.gstRate * 100).toFixed(state.gstRate * 100 % 1 ? 2 : 0)}%)`, 'Total']
     : ['Sl', 'Particulars', 'Qty', 'Rate', 'Amount'];
   const tbl = el('table');
   tbl.appendChild(el('thead', {}, el('tr', {}, head.map((h, i) => el('th', { class: i >= 2 ? 'num' : '' }, h)))));
   const tbody = el('tbody');
-  state.others.forEach((r, i) => {
+  rows.forEach((r, i) => {
     const c = calcOthers(r, state.gstRate);
     const cells = isPerRow
       ? [String(i + 1), r.particulars || '', String(r.qty), fmtNum(r.rate), fmtNum(c.amount), fmtNum(c.gst), fmtNum(c.total)]
@@ -518,9 +651,95 @@ function buildOthersInvoiceTable(isPerRow, totalsRow) {
 }
 
 // ---------- Master render ----------
+// Full rebuild — used only for structural changes (add/delete row).
 function render() {
   renderQuotation();
   renderInvoice();
+}
+
+// Lightweight update — recomputes computed cells, footers, grand total,
+// and invoice preview WITHOUT touching any input/select element. This is
+// what every keystroke in a row input triggers, so focus and caret are
+// never disturbed.
+function recompute() {
+  const t = totals();
+
+  // Glass row computed cells
+  const gRows = document.querySelectorAll('#glass-tbody tr');
+  state.glass.forEach((row, idx) => {
+    const tr = gRows[idx]; if (!tr) return;
+    const c = calcGlass(row, state.gstRate);
+    setCell(tr, 'actualSqft', fmtNum(c.actualSqft));
+    setCell(tr, 'chargeableSqft', fmtNum(c.chargeableSqft));
+    setCell(tr, 'pretax', fmtNum(c.pretax));
+    setCell(tr, 'gst', fmtNum(c.gst));
+    setCell(tr, 'total', fmtNum(c.total));
+  });
+
+  // Hardware row computed cells
+  const hRows = document.querySelectorAll('#hardware-tbody tr');
+  state.hardware.forEach((row, idx) => {
+    const tr = hRows[idx]; if (!tr) return;
+    const c = calcHardware(row, state.gstRate);
+    setCell(tr, 'amount', fmtNum(c.amount));
+    setCell(tr, 'gst', fmtNum(c.gst));
+    setCell(tr, 'total', fmtNum(c.total));
+  });
+
+  // Others row computed cells
+  const oRows = document.querySelectorAll('#others-tbody tr');
+  state.others.forEach((row, idx) => {
+    const tr = oRows[idx]; if (!tr) return;
+    const c = calcOthers(row, state.gstRate);
+    setCell(tr, 'amount', fmtNum(c.amount));
+    setCell(tr, 'gst', fmtNum(c.gst));
+    setCell(tr, 'total', fmtNum(c.total));
+  });
+
+  // Custom sections: row cells + footer
+  state.customSections.forEach((sec) => {
+    const tbody = document.querySelector('[data-custom-tbody="' + sec.id + '"]');
+    if (!tbody) return;
+    const rows = tbody.querySelectorAll('tr');
+    sec.rows.forEach((row, idx) => {
+      const tr = rows[idx]; if (!tr) return;
+      const c = calcOthers(row, state.gstRate);
+      setCell(tr, 'amount', fmtNum(c.amount));
+      setCell(tr, 'gst', fmtNum(c.gst));
+      setCell(tr, 'total', fmtNum(c.total));
+    });
+    // Section footer
+    const footPretax = document.querySelector('[data-foot="' + sec.id + '-pretax"]');
+    const footGst = document.querySelector('[data-foot="' + sec.id + '-gst"]');
+    const footAmt = document.querySelector('[data-foot="' + sec.id + '-amount"]');
+    const ct = t.custom[sec.id] || { pretax: 0, gst: 0, total: 0 };
+    if (footPretax) footPretax.textContent = fmtNum(ct.pretax);
+    if (footGst) footGst.textContent = fmtNum(ct.gst);
+    if (footAmt) footAmt.textContent = fmtNum(ct.total);
+  });
+
+  // Footer totals
+  $('#glass-total-qty').textContent = String(t.glass.qty);
+  $('#glass-total-sqft').textContent = fmtNum(t.glass.sqft);
+  $('#glass-total-pretax').textContent = fmtNum(t.glass.pretax);
+  $('#glass-total-gst').textContent = fmtNum(t.glass.gst);
+  $('#glass-total-amount').textContent = fmtNum(t.glass.total);
+  $('#hardware-total-pretax').textContent = fmtNum(t.hardware.pretax);
+  $('#hardware-total-gst').textContent = fmtNum(t.hardware.gst);
+  $('#hardware-total-amount').textContent = fmtNum(t.hardware.total);
+  $('#others-total-pretax').textContent = fmtNum(t.others.pretax);
+  $('#others-total-gst').textContent = fmtNum(t.others.gst);
+  $('#others-total-amount').textContent = fmtNum(t.others.total);
+  $('#grand-total').textContent = fmtCur(t.grand);
+
+  // Invoice preview reflects new totals too. It rebuilds its own DOM but
+  // the invoice tab is not where the user is typing, so no focus to lose.
+  renderInvoice();
+}
+
+function setCell(tr, name, value) {
+  const cell = tr.querySelector('[data-cell="' + name + '"]');
+  if (cell) cell.textContent = value;
 }
 
 // ---------- Tab + button wiring ----------
@@ -548,11 +767,26 @@ function bindUI() {
     if (which === 'others') state.others.push(blankOthers());
     render();
   }));
-  // GST rate
-  $('#gst-rate').addEventListener('input', (e) => {
-    state.gstRate = (Number(e.target.value) || 0) / 100;
+  // Add custom section
+  $('#add-section-btn').addEventListener('click', () => {
+    state.customSections.push(blankCustomSection());
     render();
   });
+  // GST rate (recompute, not full render — user is typing in the input)
+  $('#gst-rate').addEventListener('input', (e) => {
+    state.gstRate = (Number(e.target.value) || 0) / 100;
+    // Headers like "GST (18%)" are part of the invoice DOM which renderInvoice rebuilds;
+    // recompute calls renderInvoice internally so labels update too.
+    recompute();
+  });
+  // Section titles (recompute, not full render — user is typing here)
+  $('#glass-title').addEventListener('input', e => { state.titles.glass = e.target.value; renderInvoice(); });
+  $('#hardware-title').addEventListener('input', e => { state.titles.hardware = e.target.value; renderInvoice(); });
+  $('#others-title').addEventListener('input', e => { state.titles.others = e.target.value; renderInvoice(); });
+  $('#glass-title').value = state.titles.glass;
+  $('#hardware-title').value = state.titles.hardware;
+  $('#others-title').value = state.titles.others;
+
   // Project meta
   $('#meta-client').addEventListener('input', e => state.meta.client = e.target.value);
   $('#meta-address').addEventListener('input', e => state.meta.address = e.target.value);
