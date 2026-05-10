@@ -841,6 +841,93 @@ function setCell(tr, name, value) {
   if (cell) cell.textContent = value;
 }
 
+// ---------- Export / Import (JSON round-trip) ----------
+const EXPORT_VERSION = 1;
+
+function buildExportPayload() {
+  return {
+    version: EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    gstRate: state.gstRate,
+    meta: state.meta,
+    rooms: state.rooms,
+    invoice: state.invoice,
+  };
+}
+
+function exportJSON() {
+  const data = buildExportPayload();
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const safeName = (state.meta.client || 'quotation').replace(/[^a-zA-Z0-9_-]/g, '_') || 'quotation';
+  a.download = safeName + '_' + (state.meta.date || todayISO()) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function importJSON(text) {
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { alert('Could not read file — not valid JSON.'); return; }
+  if (!data || typeof data !== 'object' || data.version !== EXPORT_VERSION) {
+    alert('This file is not a Glass N Glass quotation (or uses an unsupported version).');
+    return;
+  }
+
+  // Replace state fields. Defaults guard against partial files.
+  state.gstRate = typeof data.gstRate === 'number' ? data.gstRate : 0.18;
+  state.meta = Object.assign({ client: '', address: '', project: '', date: todayISO() }, data.meta || {});
+  state.rooms = Array.isArray(data.rooms) ? data.rooms : [];
+  state.invoice = Object.assign({}, state.invoice, data.invoice || {});
+
+  // Re-derive the ID counters from the highest existing IDs so future
+  // additions don't collide with imported ones.
+  let maxRoomId = 0, maxSecId = 0;
+  for (const room of state.rooms) {
+    const m = (room.id || '').match(/^r-(\d+)$/);
+    if (m) maxRoomId = Math.max(maxRoomId, +m[1]);
+    for (const sec of (room.sections || [])) {
+      const m2 = (sec.id || '').match(/^s-(\d+)$/);
+      if (m2) maxSecId = Math.max(maxSecId, +m2[1]);
+    }
+  }
+  _nextRoomId = maxRoomId + 1;
+  _nextSectionId = maxSecId + 1;
+
+  applyStaticInputsFromState();
+  render();
+}
+
+// Reapply state values to the static (non-rendered) inputs in the page.
+// Called once on init (via bindUI) and again after Import.
+function applyStaticInputsFromState() {
+  $('#gst-rate').value = (state.gstRate * 100).toString();
+  $('#meta-client').value = state.meta.client || '';
+  $('#meta-address').value = state.meta.address || '';
+  $('#meta-project').value = state.meta.project || '';
+  $('#meta-date').value = state.meta.date || '';
+
+  const inv = state.invoice;
+  $('#inv-no').value = inv.no || '';
+  $('#inv-customer-no').value = inv.customerNo || '';
+  $('#inv-date').value = inv.date || '';
+  $('#inv-po').value = inv.po || '';
+  $('#inv-salesperson').value = inv.salesperson || '';
+  $('#inv-billto').value = inv.billTo || '';
+  $('#inv-remarks').value = inv.remarks || '';
+  $('#inv-footer').value = inv.footer || '';
+  $('#inv-shipping').value = inv.shipping ?? 0;
+  $('#inv-other').value = inv.other ?? 0;
+  $('#inv-paid').value = inv.paid ?? 0;
+
+  // Restore invoice format toggle if present in payload
+  if (inv.format) setFormat(inv.format);
+}
+
 // ---------- Tab + button wiring ----------
 function setTab(name) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
@@ -894,6 +981,19 @@ function bindUI() {
   $('#print-btn').addEventListener('click', () => {
     setTab('invoice'); // make sure preview is visible
     setTimeout(() => window.print(), 50);
+  });
+
+  // Export / Import
+  $('#export-btn').addEventListener('click', exportJSON);
+  $('#import-btn').addEventListener('click', () => $('#import-file').click());
+  $('#import-file').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => importJSON(ev.target.result);
+    reader.readAsText(file);
+    // Reset so re-importing the same file fires change again
+    e.target.value = '';
   });
 }
 

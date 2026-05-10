@@ -40,6 +40,16 @@
           <label class="text-xs text-slate-500">GST %</label>
           <input id="gst-rate" type="number" min="0" max="100" step="0.01" value="18"
                  class="w-16 px-2 py-1 text-sm border border-slate-300 rounded-md text-right" />
+          <span class="mx-1 text-slate-300">|</span>
+          <button id="export-btn" title="Download all data as JSON"
+                  class="px-3 py-1 text-xs font-medium text-slate-700 hover:text-brand-700 border border-slate-300 hover:border-brand-600 rounded-md">
+            ↓ Export
+          </button>
+          <button id="import-btn" title="Load data from a JSON file"
+                  class="px-3 py-1 text-xs font-medium text-slate-700 hover:text-brand-700 border border-slate-300 hover:border-brand-600 rounded-md">
+            ↑ Import
+          </button>
+          <input id="import-file" type="file" accept="application/json,.json" class="hidden" />
         </div>
       </div>
     </header>
